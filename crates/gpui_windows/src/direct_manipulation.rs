@@ -38,13 +38,17 @@ impl DirectManipulationHandler {
 
             let viewport: IDirectManipulationViewport = manager.CreateViewport(None, window)?;
 
-            let configuration = DIRECTMANIPULATION_CONFIGURATION_INTERACTION
+            let mut configuration = DIRECTMANIPULATION_CONFIGURATION_INTERACTION
                 | DIRECTMANIPULATION_CONFIGURATION_TRANSLATION_X
                 | DIRECTMANIPULATION_CONFIGURATION_TRANSLATION_Y
-                | DIRECTMANIPULATION_CONFIGURATION_TRANSLATION_INERTIA
                 | DIRECTMANIPULATION_CONFIGURATION_RAILS_X
                 | DIRECTMANIPULATION_CONFIGURATION_RAILS_Y
                 | DIRECTMANIPULATION_CONFIGURATION_SCALING;
+            // The system's glide after the fingers lift, unless the app runs
+            // its own (`gpui::set_platform_scroll_inertia`).
+            if gpui::platform_scroll_inertia() {
+                configuration |= DIRECTMANIPULATION_CONFIGURATION_TRANSLATION_INERTIA;
+            }
             viewport.ActivateConfiguration(configuration)?;
 
             viewport.SetViewportOptions(
