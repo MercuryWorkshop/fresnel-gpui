@@ -98,7 +98,11 @@ impl DirectManipulationHandler {
         unsafe {
             let pointer_id = wparam.loword() as u32;
             let mut pointer_type = POINTER_INPUT_TYPE::default();
-            if GetPointerType(pointer_id, &mut pointer_type).is_ok() && pointer_type == PT_TOUCHPAD
+            // Not taking the contact leaves the touchpad to the system, which
+            // scrolls it as WM_MOUSEWHEEL (`gpui::set_touchpad_scrolls_as_wheel`).
+            if GetPointerType(pointer_id, &mut pointer_type).is_ok()
+                && pointer_type == PT_TOUCHPAD
+                && !gpui::touchpad_scrolls_as_wheel()
             {
                 self.viewport.SetContact(pointer_id).log_err();
             }
