@@ -158,6 +158,9 @@ pub struct WgpuRenderer {
     device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
     surface_configured: bool,
     needs_redraw: bool,
+    /// Textures imported from outside (dma-bufs), by `ExternalTextureId`.
+    external: std::collections::HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
+    next_external: u64,
 }
 
 impl WgpuRenderer {
@@ -488,6 +491,8 @@ impl WgpuRenderer {
             device_lost: context.device_lost_flag(),
             surface_configured: true,
             needs_redraw: false,
+            external: Default::default(),
+            next_external: 1,
         })
     }
 
@@ -1304,11 +1309,11 @@ impl WgpuRenderer {
                                 &mut instance_offset,
                                 &mut pass,
                             ),
-                        PrimitiveBatch::Surfaces(_surfaces) => {
-                            // Surfaces are macOS-only for video playback
-                            // Not implemented for Linux/wgpu
-                            true
-                        }
+                        // Imported textures (dma-bufs); macOS surfaces are its own renderer's.
+                        #[cfg(not(target_os = "macos"))]
+                        PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range], &mut instance_offset, &mut pass),
+                        #[cfg(target_os = "macos")]
+                        PrimitiveBatch::Surfaces(_surfaces) => true,
                     };
                     if !ok {
                         overflow = true;
@@ -1769,6 +1774,53 @@ impl WgpuRenderer {
 
     /// Returns true if a redraw is needed because GPU state was cleared.
     /// Calling this method clears the flag.
+    /// Import another process's dma-buf as a texture `paint_external_texture`
+    /// can draw (Vulkan, with the modifier extension — `dmabuf::open_device`).
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn import_dmabuf(&mut self, image: &gpui::DmabufImage) -> anyhow::Result<gpui::ExternalTextureId> {
+        let texture = crate::dmabuf::import(&self.resources().device, image)?;
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let id = self.next_external;
+        self.next_external += 1;
+        self.external.insert(id, (texture, view));
+        Ok(gpui::ExternalTextureId(id))
+    }
+
+    pub fn release_external_texture(&mut self, id: gpui::ExternalTextureId) {
+        self.external.remove(&id.0);
+    }
+
+    /// An imported texture stretched over a surface's bounds: a polychrome
+    /// sprite whose tile is the whole texture, with the texture bound in
+    /// place of an atlas page.
+    #[cfg(not(target_os = "macos"))]
+    fn draw_surfaces(&self, surfaces: &[gpui::PaintSurface], instance_offset: &mut u64, pass: &mut wgpu::RenderPass<'_>) -> bool {
+        for surface in surfaces {
+            let Some((texture, view)) = self.external.get(&surface.texture.0) else { continue };
+            let size = texture.size();
+            let sprite = PolychromeSprite {
+                order: surface.order,
+                pad: 0,
+                grayscale: false.into(),
+                opacity: 1.0,
+                bounds: surface.bounds,
+                content_mask: surface.content_mask.clone(),
+                corner_radii: Default::default(),
+                tile: gpui::AtlasTile {
+                    texture_id: gpui::AtlasTextureId { index: 0, kind: gpui::AtlasTextureKind::Polychrome },
+                    tile_id: gpui::TileId(0),
+                    padding: 0,
+                    bounds: gpui::Bounds::new(gpui::point(gpui::DevicePixels(0), gpui::DevicePixels(0)), gpui::size(gpui::DevicePixels(size.width as i32), gpui::DevicePixels(size.height as i32))),
+                },
+            };
+            let data = unsafe { Self::instance_bytes(std::slice::from_ref(&sprite)) };
+            if !self.draw_instances_with_texture(data, 1, view, &self.resources().pipelines.poly_sprites, instance_offset, pass) {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn needs_redraw(&mut self) -> bool {
         std::mem::take(&mut self.needs_redraw)
     }
@@ -1802,6 +1854,8 @@ impl WgpuRenderer {
 
             // Drop old resources to release Arc<Device>/Arc<Queue> and GPU resources
             self.resources = None;
+            // Imported textures die with the device.
+            self.external.clear();
             *gpu_context.borrow_mut() = None;
 
             // Wait briefly for the GPU driver to stabilize, then try to

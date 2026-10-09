@@ -1924,6 +1924,14 @@ impl PlatformWindow for X11Window {
         self.0.state.borrow().renderer.gpu_specs().into()
     }
 
+    fn import_dmabuf(&self, image: &gpui::DmabufImage) -> anyhow::Result<gpui::ExternalTextureId> {
+        self.0.state.borrow_mut().renderer.import_dmabuf(image)
+    }
+
+    fn release_external_texture(&self, id: gpui::ExternalTextureId) {
+        self.0.state.borrow_mut().renderer.release_external_texture(id)
+    }
+
     fn play_system_bell(&self) {
         // Volume 0% means don't increase or decrease from system volume
         let _ = self.0.xcb.bell(0);

@@ -158,19 +158,29 @@ impl WgpuContext {
 
         let color_atlas_texture_format = Self::select_color_texture_format(adapter)?;
 
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("gpui_device"),
-                required_features,
-                required_limits: wgpu::Limits::downlevel_defaults()
-                    .using_resolution(adapter.limits())
-                    .using_alignment(adapter.limits()),
-                memory_hints: wgpu::MemoryHints::MemoryUsage,
-                trace: wgpu::Trace::Off,
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create wgpu device: {e}"))?;
+        let desc = wgpu::DeviceDescriptor {
+            label: Some("gpui_device"),
+            required_features,
+            required_limits: wgpu::Limits::downlevel_defaults()
+                .using_resolution(adapter.limits())
+                .using_alignment(adapter.limits()),
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            trace: wgpu::Trace::Off,
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        };
+        // On Linux's Vulkan, opened so it can import dma-bufs; else (or if
+        // that fails) the ordinary way.
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        let opened = crate::dmabuf::open_device(adapter, &desc);
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        let opened = None;
+        let (device, queue) = match opened {
+            Some(pair) => pair,
+            None => adapter
+                .request_device(&desc)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create wgpu device: {e}"))?,
+        };
 
         Ok((
             device,

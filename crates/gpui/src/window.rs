@@ -4298,6 +4298,32 @@ impl Window {
         });
     }
 
+    /// Import another process's dma-buf as a texture this window can draw
+    /// ([`Window::paint_external_texture`]); release it when done.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn import_dmabuf(&mut self, image: &crate::DmabufImage) -> Result<crate::ExternalTextureId> {
+        self.platform_window.import_dmabuf(image)
+    }
+
+    /// Let go of a texture [`Window::import_dmabuf`] made.
+    pub fn release_external_texture(&mut self, id: crate::ExternalTextureId) {
+        self.platform_window.release_external_texture(id);
+    }
+
+    /// Paint an imported texture into `bounds`, stretched to them.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(not(target_os = "macos"))]
+    pub fn paint_external_texture(&mut self, bounds: Bounds<Pixels>, texture: crate::ExternalTextureId) {
+        use crate::PaintSurface;
+
+        self.invalidator.debug_assert_paint();
+
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintSurface { order: 0, bounds, content_mask, texture });
+    }
+
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
         for frame_index in 0..data.frame_count() {

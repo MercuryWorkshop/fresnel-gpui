@@ -771,6 +771,9 @@ pub struct PaintSurface {
     pub content_mask: ContentMask<ScaledPixels>,
     #[cfg(target_os = "macos")]
     pub image_buffer: core_video::pixel_buffer::CVPixelBuffer,
+    /// A texture the platform imported from outside (a dma-buf, on Linux).
+    #[cfg(not(target_os = "macos"))]
+    pub texture: crate::ExternalTextureId,
 }
 
 impl From<PaintSurface> for Primitive {

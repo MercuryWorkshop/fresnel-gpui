@@ -790,6 +790,32 @@ pub enum TextInputStateChange {
     ContentChanged,
 }
 
+/// A texture imported from outside the renderer (another process's GPU
+/// buffer), drawn with [`crate::Window::paint_external_texture`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ExternalTextureId(pub u64);
+
+/// A single-plane dma-buf another process rendered into: its fd, geometry,
+/// DRM format modifier and fourcc — what a Wayland-style producer hands over.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[derive(Debug)]
+pub struct DmabufImage {
+    /// The plane's fd. The importer dups it; the caller keeps its own.
+    pub fd: std::os::fd::OwnedFd,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Bytes per row.
+    pub stride: u32,
+    /// Where the plane starts in the buffer.
+    pub offset: u32,
+    /// The DRM format modifier (LINEAR is 0).
+    pub modifier: u64,
+    /// The DRM fourcc.
+    pub fourcc: u32,
+}
+
 #[expect(missing_docs)]
 pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn bounds(&self) -> Bounds<Pixels>;
@@ -893,6 +919,15 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     fn set_client_inset(&self, _inset: Pixels) {}
     fn gpu_specs(&self) -> Option<GpuSpecs>;
+
+    /// Import another process's dma-buf as a texture this window can draw.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn import_dmabuf(&self, _image: &DmabufImage) -> anyhow::Result<ExternalTextureId> {
+        anyhow::bail!("this window's renderer cannot import a dma-buf")
+    }
+
+    /// Let go of an imported texture.
+    fn release_external_texture(&self, _id: ExternalTextureId) {}
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>);
 

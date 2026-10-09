@@ -1889,6 +1889,14 @@ impl PlatformWindow for WaylandWindow {
         self.borrow().renderer.gpu_specs().into()
     }
 
+    fn import_dmabuf(&self, image: &gpui::DmabufImage) -> anyhow::Result<gpui::ExternalTextureId> {
+        self.borrow_mut().renderer.import_dmabuf(image)
+    }
+
+    fn release_external_texture(&self, id: gpui::ExternalTextureId) {
+        self.borrow_mut().renderer.release_external_texture(id)
+    }
+
     fn play_system_bell(&self) {
         let state = self.borrow();
         let surface = if state.surface_state.toplevel().is_some() {
