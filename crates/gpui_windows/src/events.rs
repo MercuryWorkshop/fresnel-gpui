@@ -985,6 +985,12 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Option<isize> {
+        if button == MouseButton::Left
+            && wparam.0 as u32 == HTCAPTION
+            && self.state.pending_move.replace(false)
+        {
+            return None;
+        }
         if let Some(mut func) = self.state.callbacks.input.take() {
             let scale_factor = self.state.scale_factor.get();
             let mut cursor_point = POINT {

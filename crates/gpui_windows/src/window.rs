@@ -75,6 +75,10 @@ pub struct WindowsWindowState {
     /// Shared with [`WindowsPlatformState::cursor_visible`].
     pub cursor_visible: Arc<AtomicBool>,
     pub nc_button_pressed: Cell<Option<u32>>,
+    /// Set by `start_window_move` for the caption press it posts, so that
+    /// press goes straight to the system's move loop instead of back to the
+    /// app as a mouse-down.
+    pub pending_move: Cell<bool>,
 
     pub display: Cell<WindowsDisplay>,
     /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
@@ -173,6 +177,7 @@ impl WindowsWindowState {
             current_cursor: Cell::new(current_cursor),
             cursor_visible,
             nc_button_pressed: Cell::new(nc_button_pressed),
+            pending_move: Cell::new(false),
             display: Cell::new(display),
             fullscreen: Cell::new(fullscreen),
             initial_placement: Cell::new(initial_placement),
@@ -894,9 +899,34 @@ impl PlatformWindow for WindowsWindow {
         unsafe { ShowWindowAsync(self.0.hwnd, SW_MINIMIZE).ok().log_err() };
     }
 
+    fn start_window_move(&self) {
+        // The app has no title bar the system knows of, so hand it the press
+        // as if it had landed on one: the system's own move loop then runs,
+        // with its snapping. Posted rather than sent, so the loop starts after
+        // the app's mouse-down handler has returned.
+        unsafe {
+            let mut cursor = POINT::default();
+            if GetCursorPos(&mut cursor).is_err() {
+                return;
+            }
+            self.state.pending_move.set(true);
+            ReleaseCapture().log_err();
+            let lparam = ((cursor.y as u16 as u32) << 16) | (cursor.x as u16 as u32);
+            PostMessageW(
+                Some(self.0.hwnd),
+                WM_NCLBUTTONDOWN,
+                WPARAM(HTCAPTION as usize),
+                LPARAM(lparam as isize),
+            )
+            .log_err();
+        }
+    }
+
     fn zoom(&self) {
         unsafe {
-            if IsWindowVisible(self.0.hwnd).as_bool() {
+            if IsWindowVisible(self.0.hwnd).as_bool() && self.state.is_maximized() {
+                ShowWindowAsync(self.0.hwnd, SW_RESTORE).ok().log_err();
+            } else if IsWindowVisible(self.0.hwnd).as_bool() {
                 ShowWindowAsync(self.0.hwnd, SW_MAXIMIZE).ok().log_err();
             } else if let Some(mut status) = self.state.initial_placement.take() {
                 status.state = WindowOpenState::Maximized;
