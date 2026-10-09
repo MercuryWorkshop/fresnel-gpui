@@ -1803,7 +1803,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                                         state.keyboard_focused_window.as_ref().unwrap().clone();
 
                                     drop(state);
-                                    focused_window.handle_input(input.clone());
+                                    gpui::with_native_key_code(keycode.raw(), || focused_window.handle_input(input.clone()));
 
                                     // If the new scheduled time is in the past the event will repeat as soon as possible
                                     TimeoutAction::ToInstant(event_timestamp + repeat_interval)
@@ -1812,7 +1812,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                             .unwrap();
 
                         drop(state);
-                        focused_window.handle_input(input);
+                        gpui::with_native_key_code(keycode.raw(), || focused_window.handle_input(input));
                     }
                     wl_keyboard::KeyState::Released if !keysym.is_modifier_key() => {
                         let input = PlatformInput::KeyUp(KeyUpEvent {
@@ -1824,7 +1824,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                         }
 
                         drop(state);
-                        focused_window.handle_input(input);
+                        gpui::with_native_key_code(keycode.raw(), || focused_window.handle_input(input));
                     }
                     _ => {}
                 }

@@ -774,6 +774,10 @@ pub struct PaintSurface {
     /// A texture the platform imported from outside (a dma-buf, on Linux).
     #[cfg(not(target_os = "macos"))]
     pub texture: crate::ExternalTextureId,
+    /// How much of the texture to show, from its top left (a producer may
+    /// render a frame smaller than the buffer it allocated).
+    #[cfg(not(target_os = "macos"))]
+    pub source: Size<crate::DevicePixels>,
 }
 
 impl From<PaintSurface> for Primitive {

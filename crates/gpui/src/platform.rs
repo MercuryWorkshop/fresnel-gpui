@@ -795,6 +795,26 @@ pub enum TextInputStateChange {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ExternalTextureId(pub u64);
 
+thread_local! {
+    static NATIVE_KEY_CODE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// The platform's own code for the key whose event is being dispatched (an
+/// xkb keycode on Linux), for a handler that forwards keys to something
+/// that wants the hardware key rather than gpui's name for it. `None`
+/// outside a key event, and on platforms that don't say.
+pub fn native_key_code() -> Option<u32> {
+    NATIVE_KEY_CODE.with(|c| c.get())
+}
+
+/// Run `f` (a key event's dispatch) with [`native_key_code`] answering `code`.
+pub fn with_native_key_code<R>(code: u32, f: impl FnOnce() -> R) -> R {
+    let before = NATIVE_KEY_CODE.with(|c| c.replace(Some(code)));
+    let result = f();
+    NATIVE_KEY_CODE.with(|c| c.set(before));
+    result
+}
+
 /// A single-plane dma-buf another process rendered into: its fd, geometry,
 /// DRM format modifier and fourcc — what a Wayland-style producer hands over.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

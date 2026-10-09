@@ -4310,18 +4310,19 @@ impl Window {
         self.platform_window.release_external_texture(id);
     }
 
-    /// Paint an imported texture into `bounds`, stretched to them.
+    /// Paint the top-left `source` of an imported texture into `bounds`,
+    /// stretched to them.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
     #[cfg(not(target_os = "macos"))]
-    pub fn paint_external_texture(&mut self, bounds: Bounds<Pixels>, texture: crate::ExternalTextureId) {
+    pub fn paint_external_texture(&mut self, bounds: Bounds<Pixels>, texture: crate::ExternalTextureId, source: Size<DevicePixels>) {
         use crate::PaintSurface;
 
         self.invalidator.debug_assert_paint();
 
         let bounds = self.snap_bounds(bounds);
         let content_mask = self.snapped_content_mask();
-        self.next_frame.scene.insert_primitive(PaintSurface { order: 0, bounds, content_mask, texture });
+        self.next_frame.scene.insert_primitive(PaintSurface { order: 0, bounds, content_mask, texture, source });
     }
 
     /// Removes an image from the sprite atlas.

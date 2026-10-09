@@ -1100,11 +1100,13 @@ impl X11Client {
                     keystroke
                 };
                 drop(state);
-                window.handle_input(PlatformInput::KeyDown(gpui::KeyDownEvent {
-                    keystroke,
-                    is_held: false,
-                    prefer_character_input: false,
-                }));
+                gpui::with_native_key_code(u32::from(event.detail), || {
+                    window.handle_input(PlatformInput::KeyDown(gpui::KeyDownEvent {
+                        keystroke,
+                        is_held: false,
+                        prefer_character_input: false,
+                    }))
+                });
             }
             Event::KeyRelease(event) => {
                 let window = self.get_window(event.event)?;
@@ -1126,7 +1128,9 @@ impl X11Client {
                     keystroke
                 };
                 drop(state);
-                window.handle_input(PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }));
+                gpui::with_native_key_code(u32::from(event.detail), || {
+                    window.handle_input(PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }))
+                });
             }
             Event::XinputButtonPress(event) => {
                 let window = self.get_window(event.event)?;

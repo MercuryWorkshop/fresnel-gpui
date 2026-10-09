@@ -1798,6 +1798,8 @@ impl WgpuRenderer {
         for surface in surfaces {
             let Some((texture, view)) = self.external.get(&surface.texture.0) else { continue };
             let size = texture.size();
+            let (w, h) = (surface.source.width.0.clamp(0, size.width as i32), surface.source.height.0.clamp(0, size.height as i32));
+            let (w, h) = if w == 0 || h == 0 { (size.width as i32, size.height as i32) } else { (w, h) };
             let sprite = PolychromeSprite {
                 order: surface.order,
                 pad: 0,
@@ -1810,7 +1812,7 @@ impl WgpuRenderer {
                     texture_id: gpui::AtlasTextureId { index: 0, kind: gpui::AtlasTextureKind::Polychrome },
                     tile_id: gpui::TileId(0),
                     padding: 0,
-                    bounds: gpui::Bounds::new(gpui::point(gpui::DevicePixels(0), gpui::DevicePixels(0)), gpui::size(gpui::DevicePixels(size.width as i32), gpui::DevicePixels(size.height as i32))),
+                    bounds: gpui::Bounds::new(gpui::point(gpui::DevicePixels(0), gpui::DevicePixels(0)), gpui::size(gpui::DevicePixels(w), gpui::DevicePixels(h))),
                 },
             };
             let data = unsafe { Self::instance_bytes(std::slice::from_ref(&sprite)) };
