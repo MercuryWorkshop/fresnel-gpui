@@ -39,7 +39,7 @@ use image::RgbaImage;
 use core_foundation::base::{CFRelease, CFTypeRef};
 use core_foundation_sys::base::CFEqual;
 use core_foundation_sys::number::{CFBooleanGetValue, CFBooleanRef};
-use core_graphics::display::{CGDirectDisplayID, CGRect};
+use core_graphics::display::CGDirectDisplayID;
 use ctor::ctor;
 use futures::channel::oneshot;
 use gpui_util::ResultExt;
@@ -80,6 +80,7 @@ static mut WINDOW_CLASS: *const Class = ptr::null();
 static mut PANEL_CLASS: *const Class = ptr::null();
 static mut VIEW_CLASS: *const Class = ptr::null();
 static mut BLURRED_VIEW_CLASS: *const Class = ptr::null();
+static mut OVERLAY_VIEW_CLASS: *const Class = ptr::null();
 
 #[allow(non_upper_case_globals)]
 const NSWindowStyleMaskNonactivatingPanel: NSWindowStyleMask =
@@ -233,6 +234,10 @@ unsafe fn build_classes() {
                 set_frame_size as extern "C" fn(&Object, Sel, NSSize),
             );
             decl.add_method(
+                sel!(setFrame:),
+                set_frame as extern "C" fn(&Object, Sel, NSRect),
+            );
+            decl.add_method(
                 sel!(displayLayer:),
                 display_layer as extern "C" fn(&Object, Sel, id),
             );
@@ -301,6 +306,15 @@ unsafe fn build_classes() {
             );
             decl.register()
         };
+        // The window overlay's view (`Window::paint_overlay`): hosts the
+        // overlay renderer's layer above every other view in the window, and
+        // is never hit — events go to gpui's own view beneath it.
+        OVERLAY_VIEW_CLASS = {
+            let mut decl = ClassDecl::new("GPUIOverlayView", class!(NSView)).unwrap();
+            decl.add_method(sel!(hitTest:), overlay_hit_test as extern "C" fn(&Object, Sel, NSPoint) -> id);
+            decl.add_method(sel!(isOpaque), overlay_is_opaque as extern "C" fn(&Object, Sel) -> BOOL);
+            decl.register()
+        };
         BLURRED_VIEW_CLASS = {
             let mut decl = ClassDecl::new("BlurredView", class!(NSVisualEffectView)).unwrap();
             decl.add_method(
@@ -316,9 +330,20 @@ unsafe fn build_classes() {
     }
 }
 
-pub(crate) fn convert_mouse_position(position: NSPoint, window_height: Pixels) -> Point<Pixels> {
+extern "C" fn overlay_hit_test(_: &Object, _: Sel, _: NSPoint) -> id {
+    nil
+}
+
+extern "C" fn overlay_is_opaque(_: &Object, _: Sel) -> BOOL {
+    NO
+}
+
+/// A point in window coordinates as gpui's: from the top left of gpui's view,
+/// whose left edge and top (in window coordinates) are `view`.
+pub(crate) fn convert_mouse_position(position: NSPoint, view: (Pixels, Pixels)) -> Point<Pixels> {
+    let (view_left, window_height) = view;
     point(
-        px(position.x as f32),
+        px(position.x as f32) - view_left,
         // macOS screen coordinates are relative to bottom left
         window_height - px(position.y as f32),
     )
@@ -493,6 +518,11 @@ struct MacWindowState {
     background_executor: BackgroundExecutor,
     native_window: id,
     native_view: NonNull<Object>,
+    /// The overlay (`Window::paint_overlay`): its view and renderer, made the
+    /// first time anything paints there.
+    overlay: Option<(id, renderer::Renderer)>,
+    /// The view's size gpui last laid out at.
+    laid_out_size: Option<Size<Pixels>>,
     blurred_view: Option<id>,
     background_appearance: WindowBackgroundAppearance,
     cursor_style: CursorStyle,
@@ -728,10 +758,20 @@ impl MacWindowState {
         )
     }
 
+    /// gpui's view's size: the content view's, unless the view has been
+    /// placed inside another (a split view's pane).
     fn content_size(&self) -> Size<Pixels> {
-        let NSSize { width, height, .. } =
-            unsafe { NSView::frame(self.native_window.contentView()) }.size;
+        let NSSize { width, height, .. } = unsafe { NSView::bounds(self.native_view.as_ptr()) }.size;
         size(px(width as f32), px(height as f32))
+    }
+
+    /// gpui's view in window coordinates: its left edge and its top.
+    fn view_origin(&self) -> (Pixels, Pixels) {
+        unsafe {
+            let view = self.native_view.as_ptr();
+            let rect: NSRect = msg_send![view, convertRect: NSView::bounds(view) toView: nil];
+            (px(rect.origin.x as f32), px((rect.origin.y + rect.size.height) as f32))
+        }
     }
 
     fn scale_factor(&self) -> f32 {
@@ -888,6 +928,8 @@ impl MacWindow {
                 background_executor,
                 native_window,
                 native_view: NonNull::new_unchecked(native_view),
+                overlay: None,
+                laid_out_size: None,
                 blurred_view: None,
                 background_appearance: WindowBackgroundAppearance::Opaque,
                 cursor_style: CursorStyle::Arrow,
@@ -1170,6 +1212,13 @@ impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
         this.renderer.destroy();
+        if let Some((view, overlay)) = this.overlay.take() {
+            overlay.destroy();
+            unsafe {
+                let _: () = msg_send![view, removeFromSuperview];
+                let _: () = msg_send![view, release];
+            }
+        }
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
         this.frame_source.take();
@@ -1332,7 +1381,7 @@ impl PlatformWindow for MacWindow {
                 .native_window
                 .mouseLocationOutsideOfEventStream()
         };
-        convert_mouse_position(position, self.content_size().height)
+        convert_mouse_position(position, self.0.lock().view_origin())
     }
 
     fn modifiers(&self) -> Modifiers {
@@ -1765,6 +1814,63 @@ impl PlatformWindow for MacWindow {
         this.renderer.draw(scene);
     }
 
+    fn has_overlay_layer(&self) -> bool {
+        true
+    }
+
+    /// The overlay, in its own layer above every view in the window: made on
+    /// first use, kept over gpui's view (wherever that view sits — another
+    /// view may host it) and its size, and cleared when nothing paints there.
+    fn draw_overlay(&self, scene: &gpui::Scene) {
+        let mut this = self.0.lock();
+        if this.overlay.is_none() && scene.len() == 0 {
+            return;
+        }
+        let native_view = this.native_view.as_ptr();
+        let scale = this.scale_factor();
+        unsafe {
+            let parent: id = msg_send![native_view, superview];
+            if parent == nil {
+                return;
+            }
+            if this.overlay.is_none() {
+                let renderer = this.renderer.new_overlay();
+                let view: id = msg_send![OVERLAY_VIEW_CLASS, alloc];
+                let view: id = msg_send![view, initWithFrame: NSView::frame(native_view)];
+                // Layer hosting: the layer before wantsLayer.
+                let _: () = msg_send![view, setLayer: renderer.layer_ptr()];
+                let _: () = msg_send![view, setWantsLayer: YES];
+                this.overlay = Some((view, renderer));
+            }
+            let (view, renderer) = this.overlay.as_mut().expect("just made");
+            let view = *view;
+            // Above everything, in gpui's view's parent, over its frame.
+            let current: id = msg_send![view, superview];
+            let subviews: id = msg_send![parent, subviews];
+            let count: u64 = msg_send![subviews, count];
+            let last: id = if count > 0 { msg_send![subviews, lastObject] } else { nil };
+            if current != parent || last != view {
+                let _: () = msg_send![view, removeFromSuperview];
+                let _: () = msg_send![parent, addSubview: view positioned: NSWindowOrderingMode::NSWindowAbove relativeTo: nil];
+            }
+            let frame = NSView::frame(native_view);
+            let now: NSRect = msg_send![view, frame];
+            if now.origin.x != frame.origin.x || now.origin.y != frame.origin.y || now.size.width != frame.size.width || now.size.height != frame.size.height {
+                let _: () = msg_send![view, setFrame: frame];
+            }
+            let size = gpui::size(
+                gpui::DevicePixels::from((frame.size.width * scale as f64).round() as i32),
+                gpui::DevicePixels::from((frame.size.height * scale as f64).round() as i32),
+            );
+            let drawable: NSSize = msg_send![renderer.layer_ptr(), drawableSize];
+            if drawable.width as i32 != size.width.0 || drawable.height as i32 != size.height.0 {
+                let _: () = msg_send![renderer.layer_ptr(), setContentsScale: scale as f64];
+                renderer.update_drawable_size(size);
+            }
+            renderer.draw(scene);
+        }
+    }
+
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.0.lock().renderer.sprite_atlas().clone()
     }
@@ -2122,8 +2228,8 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
 
-    let window_height = lock.content_size().height;
-    let event = unsafe { platform_input_from_native(native_event, Some(window_height)) };
+    let view = lock.view_origin();
+    let event = unsafe { platform_input_from_native(native_event, Some(view)) };
 
     let Some(event) = event else {
         return NO;
@@ -2263,8 +2369,8 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
     let window_state = unsafe { get_window_state(this) };
     let weak_window_state = Arc::downgrade(&window_state);
     let mut lock = window_state.as_ref().lock();
-    let window_height = lock.content_size().height;
-    let event = unsafe { platform_input_from_native(native_event, Some(window_height)) };
+    let view = lock.view_origin();
+    let event = unsafe { platform_input_from_native(native_event, Some(view)) };
 
     if let Some(mut event) = event {
         // AppKit unhides the cursor on the next mouse movement; mirror that here.
@@ -2633,29 +2739,34 @@ extern "C" fn view_did_change_backing_properties(this: &Object, _: Sel) {
 }
 
 extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
-    fn convert(value: NSSize) -> Size<Pixels> {
-        Size {
-            width: px(value.width as f32),
-            height: px(value.height as f32),
-        }
-    }
-
-    let window_state = unsafe { get_window_state(this) };
-    let mut lock = window_state.as_ref().lock();
-
-    let new_size = convert(size);
-    let old_size = unsafe {
-        let old_frame: NSRect = msg_send![this, frame];
-        convert(old_frame.size)
-    };
-
-    if old_size == new_size {
-        return;
-    }
-
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), setFrameSize: size];
     }
+    view_resized(this);
+}
+
+/// Auto Layout (a view placed inside another, as a split view's pane) sets the
+/// frame whole, and the frame may already hold the new size by the time a
+/// `setFrameSize:` arrives: both lead here.
+extern "C" fn set_frame(this: &Object, _: Sel, frame: NSRect) {
+    unsafe {
+        let _: () = msg_send![super(this, class!(NSView)), setFrame: frame];
+    }
+    view_resized(this);
+}
+
+/// The view's size changed (or might have): resize the drawable and tell
+/// gpui, once per size — compared with the size gpui last laid out at, not
+/// the view's frame, which AppKit may already have updated.
+fn view_resized(this: &Object) {
+    let window_state = unsafe { get_window_state(this) };
+    let mut lock = window_state.as_ref().lock();
+
+    let new_size = lock.content_size();
+    if lock.laid_out_size == Some(new_size) {
+        return;
+    }
+    lock.laid_out_size = Some(new_size);
 
     let scale_factor = lock.scale_factor();
     let drawable_size = new_size.to_device_pixels(scale_factor);
@@ -2759,13 +2870,10 @@ fn get_frame(this: &Object) -> NSRect {
     unsafe {
         let state = get_window_state(this);
         let lock = state.lock();
-        let mut frame = NSWindow::frame(lock.native_window);
-        let content_layout_rect: CGRect = msg_send![lock.native_window, contentLayoutRect];
-        let style_mask: NSWindowStyleMask = msg_send![lock.native_window, styleMask];
-        if !style_mask.contains(NSWindowStyleMask::NSFullSizeContentViewWindowMask) {
-            frame.origin.y -= frame.size.height - content_layout_rect.size.height;
-        }
-        frame
+        // gpui's view on screen (it need not fill the window).
+        let view = lock.native_view.as_ptr();
+        let in_window: NSRect = msg_send![view, convertRect: NSView::bounds(view) toView: nil];
+        msg_send![lock.native_window, convertRectToScreen: in_window]
     }
 }
 
@@ -3035,7 +3143,7 @@ fn send_file_drop_event(
 
 fn drag_event_position(window_state: &Mutex<MacWindowState>, dragging_info: id) -> Point<Pixels> {
     let drag_location: NSPoint = unsafe { msg_send![dragging_info, draggingLocation] };
-    convert_mouse_position(drag_location, window_state.lock().content_size().height)
+    convert_mouse_position(drag_location, window_state.lock().view_origin())
 }
 
 fn with_input_handler<F, R>(window: &Object, f: F) -> Option<R>

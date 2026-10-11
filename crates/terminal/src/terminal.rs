@@ -2672,7 +2672,7 @@ impl Terminal {
                 None
             }
             /* Calculate the appropriate scroll lines */
-            TouchPhase::Moved => {
+            TouchPhase::Moved | TouchPhase::MomentumStarted | TouchPhase::MomentumMoved => {
                 let old_offset = (self.scroll_px / line_height) as i32;
 
                 self.scroll_px += e.delta.pixel_delta(line_height).y * scroll_multiplier;
@@ -2686,7 +2686,7 @@ impl Terminal {
                 Some(new_offset - old_offset)
             }
             // Cancellation does not commit a scroll, same as a plain end.
-            TouchPhase::Ended | TouchPhase::Cancelled => None,
+            TouchPhase::Ended | TouchPhase::Cancelled | TouchPhase::MomentumEnded => None,
         }
     }
 

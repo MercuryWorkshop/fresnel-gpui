@@ -882,6 +882,15 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
     fn draw(&self, scene: &Scene);
+    /// Composite `scene` above the platform's own views in the window
+    /// (`Window::paint_overlay`). Platforms with no such layer composite the
+    /// overlay with the main scene instead: draw it last (the default does
+    /// nothing, and `Window` merges it there).
+    fn draw_overlay(&self, _scene: &Scene) {}
+    /// Whether `draw_overlay` composites a separate layer.
+    fn has_overlay_layer(&self) -> bool {
+        false
+    }
     fn completed_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;

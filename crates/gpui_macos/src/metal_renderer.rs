@@ -175,6 +175,27 @@ impl MetalRenderer {
         Self::new_internal(device, Some(layer), !transparent, instance_buffer_pool)
     }
 
+    /// A renderer for this one's window overlay (`Window::paint_overlay`): its
+    /// own transparent `CAMetalLayer`, on the same device and drawing from the
+    /// same sprite atlas — the scene's glyphs and images are tiles in it.
+    pub fn new_overlay(&self) -> Self {
+        let layer = metal::MetalLayer::new();
+        layer.set_device(&self.device);
+        layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        layer.set_opaque(false);
+        layer.set_maximum_drawable_count(3);
+        unsafe {
+            let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: NO];
+        }
+        Self::new_internal_with_atlas(
+            self.device.clone(),
+            Some(layer),
+            false,
+            self.instance_buffer_pool.clone(),
+            Some(self.sprite_atlas.clone()),
+        )
+    }
+
     /// Creates a new headless MetalRenderer for offscreen rendering without a window.
     ///
     /// This renderer can render scenes to images without requiring a CAMetalLayer,
@@ -212,6 +233,16 @@ impl MetalRenderer {
         layer: Option<metal::MetalLayer>,
         opaque: bool,
         instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
+    ) -> Self {
+        Self::new_internal_with_atlas(device, layer, opaque, instance_buffer_pool, None)
+    }
+
+    fn new_internal_with_atlas(
+        device: metal::Device,
+        layer: Option<metal::MetalLayer>,
+        opaque: bool,
+        instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
+        atlas: Option<Arc<MetalAtlas>>,
     ) -> Self {
         #[cfg(feature = "runtime_shaders")]
         let library = device
@@ -324,7 +355,7 @@ impl MetalRenderer {
         );
 
         let command_queue = device.new_command_queue();
-        let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
+        let sprite_atlas = atlas.unwrap_or_else(|| Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu)));
         let core_video_texture_cache =
             CVMetalTextureCache::new(None, device.clone(), None).unwrap();
 

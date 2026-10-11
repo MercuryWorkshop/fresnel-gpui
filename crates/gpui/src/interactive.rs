@@ -97,6 +97,14 @@ pub enum TouchPhase {
     /// normally. Consumers must fully unwind any in-progress interaction,
     /// treating the touch as if it never committed.
     Cancelled,
+    /// The platform's own momentum, after the fingers lifted, began: its
+    /// deltas are already decelerated (macOS's `momentumPhase`), so a
+    /// consumer applies them as they come and runs no fling of its own.
+    MomentumStarted,
+    /// A delta of the platform's momentum.
+    MomentumMoved,
+    /// The platform's momentum ended (or was interrupted by a touch).
+    MomentumEnded,
 }
 
 /// Identifies one touch (finger or stylus contact) for its lifetime, from

@@ -828,6 +828,13 @@ pub(crate) struct Frame {
     pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
+    /// What paints above the platform's own views (`Window::paint_overlay`):
+    /// a second layer the platform composites over everything else in the
+    /// window, so content can sit under native material (glass) and controls
+    /// over it.
+    pub(crate) overlay_scene: Scene,
+    /// Paint calls go to `overlay_scene` while set.
+    pub(crate) painting_overlay: bool,
     pub(crate) hitboxes: Vec<Hitbox>,
     pub(crate) window_control_hitboxes: Vec<(WindowControlArea, Hitbox)>,
     pub(crate) deferred_draws: Vec<DeferredDraw>,
@@ -874,6 +881,8 @@ impl Frame {
             mouse_listeners: Vec::new(),
             dispatch_tree,
             scene: Scene::default(),
+            overlay_scene: Scene::default(),
+            painting_overlay: false,
             hitboxes: Vec::new(),
             window_control_hitboxes: Vec::new(),
             deferred_draws: Vec::new(),
@@ -899,6 +908,8 @@ impl Frame {
         self.mouse_listeners.clear();
         self.dispatch_tree.clear();
         self.scene.clear();
+        self.overlay_scene.clear();
+        self.painting_overlay = false;
         self.input_handlers.clear();
         self.tooltip_requests.clear();
         self.cursor_styles.clear();
@@ -975,6 +986,12 @@ impl Frame {
         }
 
         self.scene.finish();
+        self.overlay_scene.finish();
+    }
+
+    /// The scene paint calls go to: the overlay's while one paints.
+    pub(crate) fn target_scene(&mut self) -> &mut Scene {
+        if self.painting_overlay { &mut self.overlay_scene } else { &mut self.scene }
     }
 }
 
@@ -2826,6 +2843,7 @@ impl Window {
     #[profiling::function]
     fn present(&mut self) {
         self.platform_window.draw(&self.rendered_frame.scene);
+        self.platform_window.draw_overlay(&self.rendered_frame.overlay_scene);
         #[cfg(feature = "input-latency-histogram")]
         self.input_latency_tracker.record_frame_presented();
         self.needs_present.set(false);
@@ -3712,6 +3730,22 @@ impl Window {
         });
     }
 
+    /// Paint what `f` paints into the window's overlay: a second layer the
+    /// platform composites above its own views (macOS: over native material
+    /// such as glass), where the platform has one; elsewhere into the scene
+    /// as usual. Hit-testing and focus are unaffected — only
+    /// where the pixels land. Not for cached views: a replayed view brings
+    /// back only what it painted into the main scene.
+    pub fn paint_overlay<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        if !self.platform_window.has_overlay_layer() {
+            return f(self);
+        }
+        let was = std::mem::replace(&mut self.next_frame.painting_overlay, true);
+        let result = f(self);
+        self.next_frame.painting_overlay = was;
+        result
+    }
+
     /// Creates a new painting layer for the specified bounds. A "layer" is a batch
     /// of geometry that are non-overlapping and have the same draw order. This is typically used
     /// for performance reasons.
@@ -3723,15 +3757,14 @@ impl Window {
         let content_mask = self.content_mask();
         let clipped_bounds = bounds.intersect(&content_mask.bounds);
         if !clipped_bounds.is_empty() {
-            self.next_frame
-                .scene
-                .push_layer(self.cover_bounds(clipped_bounds));
+            let bounds = self.cover_bounds(clipped_bounds);
+            self.next_frame.target_scene().push_layer(bounds);
         }
 
         let result = f(self);
 
         if !clipped_bounds.is_empty() {
-            self.next_frame.scene.pop_layer();
+            self.next_frame.target_scene().pop_layer();
         }
 
         result
@@ -3760,7 +3793,7 @@ impl Window {
                 continue;
             }
             let shadow_bounds = (bounds + shadow.offset).dilate(shadow.spread_radius);
-            self.next_frame.scene.insert_primitive(Shadow {
+            let primitive = Shadow {
                 order: 0,
                 blur_radius: shadow.blur_radius.scale(scale_factor),
                 bounds: self.cover_bounds(shadow_bounds),
@@ -3771,7 +3804,8 @@ impl Window {
                 element_corner_radii,
                 inset: 0,
                 pad: 0,
-            });
+            };
+self.next_frame.target_scene().insert_primitive(primitive);
         }
     }
 
@@ -3805,7 +3839,7 @@ impl Window {
                 bottom_right: (corner_radii.bottom_right - shadow.spread_radius).max(zero),
                 bottom_left: (corner_radii.bottom_left - shadow.spread_radius).max(zero),
             };
-            self.next_frame.scene.insert_primitive(Shadow {
+            let primitive = Shadow {
                 order: 0,
                 blur_radius: shadow.blur_radius.scale(scale_factor),
                 bounds: self.cover_bounds(hole),
@@ -3816,7 +3850,8 @@ impl Window {
                 element_corner_radii,
                 inset: 1,
                 pad: 0,
-            });
+            };
+self.next_frame.target_scene().insert_primitive(primitive);
         }
     }
 
@@ -3847,7 +3882,7 @@ impl Window {
         };
 
         if !quad.background.is_transparent() {
-            self.next_frame.scene.insert_primitive(quad);
+            self.next_frame.target_scene().insert_primitive(quad);
             return;
         }
 
@@ -3876,7 +3911,7 @@ impl Window {
         );
 
         if inner_bounds.is_empty() {
-            self.next_frame.scene.insert_primitive(quad);
+            self.next_frame.target_scene().insert_primitive(quad);
             return;
         }
 
@@ -3906,7 +3941,7 @@ impl Window {
         for strip in strips {
             let content_mask_bounds = quad.content_mask.bounds.intersect(&strip);
             if !content_mask_bounds.is_empty() {
-                self.next_frame.scene.insert_primitive(Quad {
+                self.next_frame.target_scene().insert_primitive(Quad {
                     content_mask: ContentMask {
                         bounds: content_mask_bounds,
                     },
@@ -3929,7 +3964,7 @@ impl Window {
         let color: Background = color.into();
         path.color = color.opacity(opacity);
         self.next_frame
-            .scene
+            .target_scene()
             .insert_primitive(path.scale(scale_factor));
     }
 
@@ -3957,7 +3992,7 @@ impl Window {
         };
         let element_opacity = self.element_opacity();
 
-        self.next_frame.scene.insert_primitive(Underline {
+        let primitive = Underline {
             order: 0,
             pad: 0,
             bounds,
@@ -3965,7 +4000,8 @@ impl Window {
             color: style.color.unwrap_or_default().opacity(element_opacity),
             thickness,
             wavy: style.wavy.into(),
-        });
+        };
+self.next_frame.target_scene().insert_primitive(primitive);
     }
 
     /// Paint a strikethrough into the scene for the next frame at the current z-index.
@@ -3987,7 +4023,7 @@ impl Window {
         };
         let opacity = self.element_opacity();
 
-        self.next_frame.scene.insert_primitive(Underline {
+        let primitive = Underline {
             order: 0,
             pad: 0,
             bounds,
@@ -3995,7 +4031,8 @@ impl Window {
             thickness: self.snap_stroke(style.thickness),
             color: style.color.unwrap_or_default().opacity(opacity),
             wavy: false.into(),
-        });
+        };
+self.next_frame.target_scene().insert_primitive(primitive);
     }
 
     /// Paints a monochrome (non-emoji) glyph into the scene for the next frame at the current z-index.
@@ -4060,7 +4097,7 @@ impl Window {
             let content_mask = self.snapped_content_mask();
 
             if subpixel_rendering {
-                self.next_frame.scene.insert_primitive(SubpixelSprite {
+                self.next_frame.target_scene().insert_primitive(SubpixelSprite {
                     order: 0,
                     pad: 0,
                     bounds,
@@ -4070,7 +4107,7 @@ impl Window {
                     transformation: TransformationMatrix::unit(),
                 });
             } else {
-                self.next_frame.scene.insert_primitive(MonochromeSprite {
+                self.next_frame.target_scene().insert_primitive(MonochromeSprite {
                     order: 0,
                     pad: 0,
                     bounds,
@@ -4151,7 +4188,7 @@ impl Window {
             let content_mask = self.snapped_content_mask();
             let opacity = self.element_opacity();
 
-            self.next_frame.scene.insert_primitive(PolychromeSprite {
+            self.next_frame.target_scene().insert_primitive(PolychromeSprite {
                 order: 0,
                 pad: 0,
                 grayscale: false.into(),
@@ -4217,7 +4254,7 @@ impl Window {
             .map_origin(|value| ScaledPixels(round_half_toward_zero(value.0)))
             .map_size(|size| size.ceil());
 
-        self.next_frame.scene.insert_primitive(MonochromeSprite {
+        self.next_frame.target_scene().insert_primitive(MonochromeSprite {
             order: 0,
             pad: 0,
             bounds: final_bounds,
@@ -4266,7 +4303,7 @@ impl Window {
         let corner_radii = corner_radii.scale(self.scale_factor());
         let opacity = self.element_opacity();
 
-        self.next_frame.scene.insert_primitive(PolychromeSprite {
+        self.next_frame.target_scene().insert_primitive(PolychromeSprite {
             order: 0,
             pad: 0,
             grayscale: grayscale.into(),
@@ -4290,7 +4327,7 @@ impl Window {
 
         let bounds = self.snap_bounds(bounds);
         let content_mask = self.snapped_content_mask();
-        self.next_frame.scene.insert_primitive(PaintSurface {
+        self.next_frame.target_scene().insert_primitive(PaintSurface {
             order: 0,
             bounds,
             content_mask,
@@ -4322,7 +4359,7 @@ impl Window {
 
         let bounds = self.snap_bounds(bounds);
         let content_mask = self.snapped_content_mask();
-        self.next_frame.scene.insert_primitive(PaintSurface { order: 0, bounds, content_mask, texture, source });
+        self.next_frame.target_scene().insert_primitive(PaintSurface { order: 0, bounds, content_mask, texture, source });
     }
 
     /// Removes an image from the sprite atlas.
