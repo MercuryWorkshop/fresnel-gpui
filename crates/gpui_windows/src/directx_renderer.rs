@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     slice,
     sync::{Arc, OnceLock},
 };
@@ -7,7 +8,7 @@ use anyhow::{Context, Result};
 use gpui_util::ResultExt;
 use windows::{
     Win32::{
-        Foundation::HWND,
+        Foundation::{HANDLE, HWND},
         Graphics::{
             Direct3D::*,
             Direct3D11::*,
@@ -48,6 +49,10 @@ pub(crate) struct DirectXRenderer {
     width: u32,
     height: u32,
 
+    /// Textures imported from other processes, by `ExternalTextureId`.
+    external: HashMap<u64, ExternalTexture>,
+    next_external: u64,
+
     /// Whether we want to skip drwaing due to device lost events.
     ///
     /// In that case we want to discard the first frame that we draw as we got reset in the middle of a frame
@@ -82,6 +87,44 @@ struct DirectXResources {
     viewport: D3D11_VIEWPORT,
 }
 
+/// Another process's shared texture: the handles it was imported from, and
+/// what they open as on the current device (reopened after a device loss).
+struct ExternalTexture {
+    image: SharedTextureImage,
+    opened: Option<OpenedExternalTexture>,
+}
+
+struct OpenedExternalTexture {
+    view: [Option<ID3D11ShaderResourceView>; 1],
+    fence: Option<ID3D11Fence>,
+}
+
+impl OpenedExternalTexture {
+    /// Open the producer's texture (and fence) on `device`. No copy: the view
+    /// samples the producer's own allocation.
+    fn open(device: &ID3D11Device, image: &SharedTextureImage) -> Result<Self> {
+        let device1: ID3D11Device1 = device.cast().context("the device has no ID3D11Device1")?;
+        let texture: ID3D11Texture2D =
+            unsafe { device1.OpenSharedResource1(HANDLE(image.texture as *mut _)) }
+                .context("OpenSharedResource1 for the shared texture")?;
+        let mut view = None;
+        unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut view)) }
+            .context("a shader resource view of the shared texture")?;
+        let fence = match image.fence {
+            Some(handle) => {
+                let device5: ID3D11Device5 =
+                    device.cast().context("the device has no ID3D11Device5 (shared fences)")?;
+                let mut fence: Option<ID3D11Fence> = None;
+                unsafe { device5.OpenSharedFence(HANDLE(handle as *mut _), &mut fence) }
+                    .context("OpenSharedFence for the shared texture's fence")?;
+                fence
+            }
+            None => None,
+        };
+        Ok(Self { view: [view], fence })
+    }
+}
+
 struct DirectXRenderPipelines {
     shadow_pipeline: PipelineState<Shadow>,
     quad_pipeline: PipelineState<Quad>,
@@ -91,6 +134,10 @@ struct DirectXRenderPipelines {
     mono_sprites: PipelineState<MonochromeSprite>,
     subpixel_sprites: PipelineState<SubpixelSprite>,
     poly_sprites: PipelineState<PolychromeSprite>,
+    /// The polychrome pipeline again, with its own instance buffer: imported
+    /// textures draw one at a time mid-scene, and sharing `poly_sprites`'
+    /// buffer would overwrite the scene's sprites it holds.
+    surfaces: PipelineState<PolychromeSprite>,
 }
 
 struct DirectXGlobalElements {
@@ -191,6 +238,8 @@ impl DirectXRenderer {
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
+            external: HashMap::new(),
+            next_external: 1,
             skip_draws: false,
         })
     }
@@ -276,6 +325,10 @@ impl DirectXRenderer {
 
             self.direct_composition.take();
             self.devices.take();
+        }
+        // Opened on the lost device; the next draw opens them on the new one.
+        for external in self.external.values_mut() {
+            external.opened = None;
         }
 
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
@@ -725,9 +778,96 @@ impl DirectXRenderer {
         )
     }
 
+    pub(crate) fn import_shared_texture(&mut self, image: &SharedTextureImage) -> Result<ExternalTextureId> {
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let opened = OpenedExternalTexture::open(&devices.device, image)?;
+        let id = self.next_external;
+        self.next_external += 1;
+        self.external.insert(
+            id,
+            ExternalTexture {
+                image: *image,
+                opened: Some(opened),
+            },
+        );
+        Ok(ExternalTextureId(id))
+    }
+
+    pub(crate) fn release_external_texture(&mut self, id: ExternalTextureId) {
+        self.external.remove(&id.0);
+    }
+
+    /// Imported textures, each sampled in place through the polychrome
+    /// sprite shader, behind a GPU-side wait for its frame's fence value.
     fn draw_surfaces(&mut self, surfaces: &[PaintSurface]) -> Result<()> {
         if surfaces.is_empty() {
             return Ok(());
+        }
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let resources = self.resources.as_ref().context("resources missing")?;
+        for surface in surfaces {
+            let Some(external) = self.external.get_mut(&surface.texture.0) else {
+                continue;
+            };
+            if external.opened.is_none() {
+                match OpenedExternalTexture::open(&devices.device, &external.image) {
+                    Ok(opened) => external.opened = Some(opened),
+                    Err(error) => {
+                        log::error!("reopening a shared texture: {error:#}");
+                        self.external.remove(&surface.texture.0);
+                        continue;
+                    }
+                }
+            }
+            let Some(opened) = external.opened.as_ref() else {
+                continue;
+            };
+            if surface.fence_wait > 0
+                && let Some(fence) = &opened.fence
+            {
+                let context4: ID3D11DeviceContext4 = devices
+                    .device_context
+                    .cast()
+                    .context("the device context has no ID3D11DeviceContext4 (fence waits)")?;
+                unsafe { context4.Wait(fence, surface.fence_wait) }
+                    .context("queueing the shared texture's fence wait")?;
+            }
+            let sprite = PolychromeSprite {
+                order: surface.order,
+                pad: 0,
+                grayscale: false.into(),
+                opacity: 1.0,
+                bounds: surface.bounds,
+                content_mask: surface.content_mask.clone(),
+                corner_radii: Corners::default(),
+                tile: AtlasTile {
+                    texture_id: AtlasTextureId {
+                        index: 0,
+                        kind: AtlasTextureKind::Polychrome,
+                    },
+                    tile_id: TileId(0),
+                    padding: 0,
+                    bounds: Bounds {
+                        origin: point(DevicePixels(0), DevicePixels(0)),
+                        size: surface.source,
+                    },
+                },
+            };
+            self.pipelines.surfaces.update_buffer(
+                &devices.device,
+                &devices.device_context,
+                slice::from_ref(&sprite),
+            )?;
+            self.pipelines.surfaces.draw_range_with_texture(
+                &devices.device,
+                &devices.device_context,
+                &opened.view,
+                slice::from_ref(&resources.viewport),
+                slice::from_ref(&self.globals.global_params_buffer),
+                slice::from_ref(&self.globals.sampler),
+                0,
+                1,
+            )?;
         }
         Ok(())
     }
@@ -910,6 +1050,14 @@ impl DirectXRenderPipelines {
             create_blend_state(device)?,
         )?;
 
+        let surfaces = PipelineState::new(
+            device,
+            "surface_pipeline",
+            ShaderModule::PolychromeSprite,
+            1,
+            create_blend_state(device)?,
+        )?;
+
         Ok(Self {
             shadow_pipeline,
             quad_pipeline,
@@ -919,6 +1067,7 @@ impl DirectXRenderPipelines {
             mono_sprites,
             subpixel_sprites,
             poly_sprites,
+            surfaces,
         })
     }
 }

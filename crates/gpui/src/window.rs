@@ -4342,6 +4342,13 @@ self.next_frame.target_scene().insert_primitive(primitive);
         self.platform_window.import_dmabuf(image)
     }
 
+    /// Import another process's shared texture as one this window can draw
+    /// ([`Window::paint_shared_texture`]); release it when done.
+    #[cfg(target_os = "windows")]
+    pub fn import_shared_texture(&mut self, image: &crate::SharedTextureImage) -> Result<crate::ExternalTextureId> {
+        self.platform_window.import_shared_texture(image)
+    }
+
     /// Let go of a texture [`Window::import_dmabuf`] made.
     pub fn release_external_texture(&mut self, id: crate::ExternalTextureId) {
         self.platform_window.release_external_texture(id);
@@ -4359,7 +4366,37 @@ self.next_frame.target_scene().insert_primitive(primitive);
 
         let bounds = self.snap_bounds(bounds);
         let content_mask = self.snapped_content_mask();
-        self.next_frame.target_scene().insert_primitive(PaintSurface { order: 0, bounds, content_mask, texture, source });
+        self.next_frame.target_scene().insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask,
+            texture,
+            source,
+            #[cfg(target_os = "windows")]
+            fence_wait: 0,
+        });
+    }
+
+    /// [`Window::paint_external_texture`] for a shared texture whose frame is
+    /// complete once its fence reaches `fence_wait`. The wait is the GPU's:
+    /// the draw is queued behind it, and nothing here blocks.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(target_os = "windows")]
+    pub fn paint_shared_texture(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        texture: crate::ExternalTextureId,
+        source: Size<DevicePixels>,
+        fence_wait: u64,
+    ) {
+        use crate::PaintSurface;
+
+        self.invalidator.debug_assert_paint();
+
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.target_scene().insert_primitive(PaintSurface { order: 0, bounds, content_mask, texture, source, fence_wait });
     }
 
     /// Removes an image from the sprite atlas.

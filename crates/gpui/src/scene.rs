@@ -778,6 +778,10 @@ pub struct PaintSurface {
     /// render a frame smaller than the buffer it allocated).
     #[cfg(not(target_os = "macos"))]
     pub source: Size<crate::DevicePixels>,
+    /// The imported fence value to wait for (on the GPU) before sampling; 0
+    /// for none.
+    #[cfg(target_os = "windows")]
+    pub fence_wait: u64,
 }
 
 impl From<PaintSurface> for Primitive {

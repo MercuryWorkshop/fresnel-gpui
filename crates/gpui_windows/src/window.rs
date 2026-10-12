@@ -1024,6 +1024,14 @@ impl PlatformWindow for WindowsWindow {
         self.state.renderer.borrow().gpu_specs().log_err()
     }
 
+    fn import_shared_texture(&self, image: &SharedTextureImage) -> anyhow::Result<ExternalTextureId> {
+        self.state.renderer.borrow_mut().import_shared_texture(image)
+    }
+
+    fn release_external_texture(&self, id: ExternalTextureId) {
+        self.state.renderer.borrow_mut().release_external_texture(id);
+    }
+
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let scale_factor = self.state.scale_factor.get();
         let caret_position = POINT {

@@ -836,6 +836,20 @@ pub struct DmabufImage {
     pub fourcc: u32,
 }
 
+/// Another process's shared D3D texture (Windows), drawn without a copy:
+/// NT handles the producer duplicated into this process. The importer opens
+/// them and does not take them; the caller closes them when it is done.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug)]
+pub struct SharedTextureImage {
+    /// The texture's NT handle (a D3D12 resource created with a shared heap,
+    /// or a D3D11 texture created with an NT handle).
+    pub texture: isize,
+    /// A shared fence the producer signals when a frame's writes have landed;
+    /// each paint names the value to wait for ([`crate::Window::paint_shared_texture`]).
+    pub fence: Option<isize>,
+}
+
 #[expect(missing_docs)]
 pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn bounds(&self) -> Bounds<Pixels>;
@@ -953,6 +967,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn import_dmabuf(&self, _image: &DmabufImage) -> anyhow::Result<ExternalTextureId> {
         anyhow::bail!("this window's renderer cannot import a dma-buf")
+    }
+
+    /// Import another process's shared texture as one this window can draw.
+    #[cfg(target_os = "windows")]
+    fn import_shared_texture(&self, _image: &SharedTextureImage) -> anyhow::Result<ExternalTextureId> {
+        anyhow::bail!("this window's renderer cannot import a shared texture")
     }
 
     /// Let go of an imported texture.
