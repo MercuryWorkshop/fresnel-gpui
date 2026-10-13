@@ -2471,6 +2471,14 @@ impl Window {
         self.platform_window.show_character_palette();
     }
 
+    /// Offer the platform's inline writing tools (macOS 15.2+: Writing Tools,
+    /// rewriting in place) on the focused text input, or stop. The input's
+    /// [`EntityInputHandler`](crate::EntityInputHandler) answers for the text,
+    /// including `set_selected_text_range` and `text_length_utf16`.
+    pub fn set_writing_tools(&self, enabled: bool) {
+        self.platform_window.set_writing_tools(enabled);
+    }
+
     /// The scale factor of the display associated with the window. For example, it could
     /// return 2.0 for a "retina" display, indicating that each logical pixel should actually
     /// be rendered as two pixels on screen.
@@ -4331,8 +4339,18 @@ self.next_frame.target_scene().insert_primitive(primitive);
             order: 0,
             bounds,
             content_mask,
-            image_buffer,
+            image_buffer: Some(image_buffer),
+            texture: crate::ExternalTextureId(0),
+            source: Size::default(),
         });
+    }
+
+    /// Wrap another process's IOSurface as a texture this window can draw
+    /// ([`Window::paint_external_texture`]) without a copy; release it when
+    /// done.
+    #[cfg(target_os = "macos")]
+    pub fn import_iosurface(&mut self, image: &crate::IoSurfaceImage) -> Result<crate::ExternalTextureId> {
+        self.platform_window.import_iosurface(image)
     }
 
     /// Import another process's dma-buf as a texture this window can draw
@@ -4358,7 +4376,6 @@ self.next_frame.target_scene().insert_primitive(primitive);
     /// stretched to them.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
-    #[cfg(not(target_os = "macos"))]
     pub fn paint_external_texture(&mut self, bounds: Bounds<Pixels>, texture: crate::ExternalTextureId, source: Size<DevicePixels>) {
         use crate::PaintSurface;
 
@@ -4370,6 +4387,8 @@ self.next_frame.target_scene().insert_primitive(primitive);
             order: 0,
             bounds,
             content_mask,
+            #[cfg(target_os = "macos")]
+            image_buffer: None,
             texture,
             source,
             #[cfg(target_os = "windows")]

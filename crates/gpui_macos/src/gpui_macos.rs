@@ -29,6 +29,7 @@ mod text_system;
 mod platform;
 mod window;
 mod window_appearance;
+mod writing_tools;
 
 use cocoa::{
     base::{id, nil},

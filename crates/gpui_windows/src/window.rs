@@ -922,6 +922,48 @@ impl PlatformWindow for WindowsWindow {
         }
     }
 
+    fn show_window_menu(&self, _position: Point<Pixels>) {
+        // The system menu a native caption opens on a right click. It is
+        // tracked here rather than left to the system, which only opens it
+        // over a caption it hit-tested itself; its commands are posted back
+        // so they run outside the menu's modal loop.
+        unsafe {
+            let hwnd = self.0.hwnd;
+            let menu = GetSystemMenu(hwnd, false);
+            if menu.is_invalid() {
+                return;
+            }
+            let mut cursor = POINT::default();
+            if GetCursorPos(&mut cursor).is_err() {
+                return;
+            }
+            let maximized = self.state.is_maximized();
+            let able = |on: bool| MF_BYCOMMAND | if on { MF_ENABLED } else { MF_GRAYED };
+            let _ = EnableMenuItem(menu, SC_RESTORE, able(maximized));
+            let _ = EnableMenuItem(menu, SC_MAXIMIZE, able(!maximized));
+            let _ = EnableMenuItem(menu, SC_MOVE, able(!maximized));
+            let _ = EnableMenuItem(menu, SC_SIZE, able(!maximized));
+            let command = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                cursor.x,
+                cursor.y,
+                None,
+                hwnd,
+                None,
+            );
+            if command.0 != 0 {
+                PostMessageW(
+                    Some(hwnd),
+                    WM_SYSCOMMAND,
+                    WPARAM(command.0 as usize),
+                    LPARAM(0),
+                )
+                .log_err();
+            }
+        }
+    }
+
     fn zoom(&self) {
         unsafe {
             if IsWindowVisible(self.0.hwnd).as_bool() && self.state.is_maximized() {

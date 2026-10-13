@@ -850,6 +850,21 @@ pub struct SharedTextureImage {
     pub fence: Option<isize>,
 }
 
+/// Another process's IOSurface (macOS), drawn without a copy: the texture
+/// samples the surface's own memory, so what the producer renders next shows
+/// on the next paint. Single-plane BGRA8.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+pub struct IoSurfaceImage {
+    /// An `IOSurfaceRef`. The texture made from it holds its own reference;
+    /// the caller keeps theirs.
+    pub surface: *mut std::ffi::c_void,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
 #[expect(missing_docs)]
 pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn bounds(&self) -> Bounds<Pixels>;
@@ -924,6 +939,9 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     #[cfg(target_os = "macos")]
     fn set_traffic_light_position(&self, _position: Point<Pixels>) {}
     fn show_character_palette(&self) {}
+    /// Offer the platform's inline writing tools (macOS: Writing Tools) on
+    /// the focused text input, or stop offering them.
+    fn set_writing_tools(&self, _enabled: bool) {}
     fn titlebar_double_click(&self) {}
     fn on_move_tab_to_new_window(&self, _callback: Box<dyn FnMut()>) {}
     fn on_merge_all_windows(&self, _callback: Box<dyn FnMut()>) {}
@@ -973,6 +991,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     #[cfg(target_os = "windows")]
     fn import_shared_texture(&self, _image: &SharedTextureImage) -> anyhow::Result<ExternalTextureId> {
         anyhow::bail!("this window's renderer cannot import a shared texture")
+    }
+
+    /// Wrap another process's IOSurface as a texture this window can draw.
+    #[cfg(target_os = "macos")]
+    fn import_iosurface(&self, _image: &IoSurfaceImage) -> anyhow::Result<ExternalTextureId> {
+        anyhow::bail!("this window's renderer cannot import an IOSurface")
     }
 
     /// Let go of an imported texture.

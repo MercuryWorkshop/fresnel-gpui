@@ -137,6 +137,9 @@ pub(crate) struct MetalRenderer {
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "test-support"))]
     headless_render_target: Option<metal::Texture>,
+    /// Textures over other processes' IOSurfaces, by `ExternalTextureId`.
+    external: std::collections::HashMap<u64, metal::Texture>,
+    next_external: u64,
 }
 
 #[repr(C)]
@@ -384,7 +387,45 @@ impl MetalRenderer {
             path_sample_count: PATH_SAMPLE_COUNT,
             #[cfg(any(test, feature = "test-support"))]
             headless_render_target: None,
+            external: Default::default(),
+            next_external: 1,
         }
+    }
+
+    /// Wrap another process's IOSurface as a texture `paint_external_texture`
+    /// draws. Nothing is copied: the texture is the surface's memory.
+    pub fn import_iosurface(&mut self, image: &gpui::IoSurfaceImage) -> Result<gpui::ExternalTextureId> {
+        anyhow::ensure!(!image.surface.is_null(), "no IOSurface");
+        anyhow::ensure!(image.width > 0 && image.height > 0, "an empty IOSurface");
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_texture_type(metal::MTLTextureType::D2);
+        descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        descriptor.set_width(image.width as u64);
+        descriptor.set_height(image.height as u64);
+        descriptor.set_usage(metal::MTLTextureUsage::ShaderRead);
+        descriptor.set_storage_mode(if self.is_unified_memory {
+            metal::MTLStorageMode::Shared
+        } else {
+            metal::MTLStorageMode::Managed
+        });
+        let texture: *mut metal::MTLTexture = unsafe {
+            msg_send![
+                &*self.device,
+                newTextureWithDescriptor: &*descriptor
+                iosurface: image.surface
+                plane: 0 as NSUInteger
+            ]
+        };
+        anyhow::ensure!(!texture.is_null(), "Metal refused the IOSurface");
+        let texture = unsafe { metal::Texture::from_ptr(texture) };
+        let id = self.next_external;
+        self.next_external += 1;
+        self.external.insert(id, texture);
+        Ok(gpui::ExternalTextureId(id))
+    }
+
+    pub fn release_external_texture(&mut self, id: gpui::ExternalTextureId) {
+        self.external.remove(&id.0);
     }
 
     pub fn layer(&self) -> Option<&metal::MetalLayerRef> {
@@ -1436,9 +1477,28 @@ impl MetalRenderer {
         if sprites.is_empty() {
             return true;
         }
+        let texture = self.sprite_atlas.metal_texture(texture_id);
+        self.draw_polychrome_from(
+            &texture,
+            sprites,
+            instance_buffer,
+            instance_offset,
+            viewport_size,
+            command_encoder,
+        )
+    }
+
+    fn draw_polychrome_from(
+        &self,
+        texture: &metal::TextureRef,
+        sprites: &[PolychromeSprite],
+        instance_buffer: &mut InstanceBuffer,
+        instance_offset: &mut usize,
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+    ) -> bool {
         align_offset(instance_offset);
 
-        let texture = self.sprite_atlas.metal_texture(texture_id);
         let texture_size = size(
             DevicePixels(texture.width() as i32),
             DevicePixels(texture.height() as i32),
@@ -1469,7 +1529,7 @@ impl MetalRenderer {
             Some(&instance_buffer.metal_buffer),
             *instance_offset as u64,
         );
-        command_encoder.set_fragment_texture(SpriteInputIndex::AtlasTexture as u64, Some(&texture));
+        command_encoder.set_fragment_texture(SpriteInputIndex::AtlasTexture as u64, Some(texture));
 
         let sprite_bytes_len = mem::size_of_val(sprites);
         let buffer_contents =
@@ -1506,48 +1566,53 @@ impl MetalRenderer {
         viewport_size: Size<DevicePixels>,
         command_encoder: &metal::RenderCommandEncoderRef,
     ) -> bool {
-        command_encoder.set_render_pipeline_state(&self.surfaces_pipeline_state);
-        command_encoder.set_vertex_buffer(
-            SurfaceInputIndex::Vertices as u64,
-            Some(&self.unit_vertices),
-            0,
-        );
-        command_encoder.set_vertex_bytes(
-            SurfaceInputIndex::ViewportSize as u64,
-            mem::size_of_val(&viewport_size) as u64,
-            &viewport_size as *const Size<DevicePixels> as *const _,
-        );
-
         for surface in surfaces {
+            let Some(image_buffer) = surface.image_buffer.as_ref() else {
+                if !self.draw_external(surface, instance_buffer, instance_offset, viewport_size, command_encoder) {
+                    return false;
+                }
+                continue;
+            };
+            command_encoder.set_render_pipeline_state(&self.surfaces_pipeline_state);
+            command_encoder.set_vertex_buffer(
+                SurfaceInputIndex::Vertices as u64,
+                Some(&self.unit_vertices),
+                0,
+            );
+            command_encoder.set_vertex_bytes(
+                SurfaceInputIndex::ViewportSize as u64,
+                mem::size_of_val(&viewport_size) as u64,
+                &viewport_size as *const Size<DevicePixels> as *const _,
+            );
             let texture_size = size(
-                DevicePixels::from(surface.image_buffer.get_width() as i32),
-                DevicePixels::from(surface.image_buffer.get_height() as i32),
+                DevicePixels::from(image_buffer.get_width() as i32),
+                DevicePixels::from(image_buffer.get_height() as i32),
             );
 
             assert_eq!(
-                surface.image_buffer.get_pixel_format(),
+                image_buffer.get_pixel_format(),
                 kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
             );
 
             let y_texture = self
                 .core_video_texture_cache
                 .create_texture_from_image(
-                    surface.image_buffer.as_concrete_TypeRef(),
+                    image_buffer.as_concrete_TypeRef(),
                     None,
                     MTLPixelFormat::R8Unorm,
-                    surface.image_buffer.get_width_of_plane(0),
-                    surface.image_buffer.get_height_of_plane(0),
+                    image_buffer.get_width_of_plane(0),
+                    image_buffer.get_height_of_plane(0),
                     0,
                 )
                 .unwrap();
             let cb_cr_texture = self
                 .core_video_texture_cache
                 .create_texture_from_image(
-                    surface.image_buffer.as_concrete_TypeRef(),
+                    image_buffer.as_concrete_TypeRef(),
                     None,
                     MTLPixelFormat::RG8Unorm,
-                    surface.image_buffer.get_width_of_plane(1),
-                    surface.image_buffer.get_height_of_plane(1),
+                    image_buffer.get_width_of_plane(1),
+                    image_buffer.get_height_of_plane(1),
                     1,
                 )
                 .unwrap();
@@ -1595,6 +1660,49 @@ impl MetalRenderer {
             *instance_offset = next_offset;
         }
         true
+    }
+
+    /// An imported texture stretched over a surface's bounds: a polychrome
+    /// sprite whose tile is the texture's top-left `source`, with the texture
+    /// bound in place of an atlas page. One this renderer didn't import (the
+    /// overlay's) draws nothing.
+    fn draw_external(
+        &self,
+        surface: &PaintSurface,
+        instance_buffer: &mut InstanceBuffer,
+        instance_offset: &mut usize,
+        viewport_size: Size<DevicePixels>,
+        command_encoder: &metal::RenderCommandEncoderRef,
+    ) -> bool {
+        let Some(texture) = self.external.get(&surface.texture.0) else {
+            return true;
+        };
+        let (tw, th) = (texture.width() as i32, texture.height() as i32);
+        let (w, h) = (surface.source.width.0.clamp(0, tw), surface.source.height.0.clamp(0, th));
+        let (w, h) = if w == 0 || h == 0 { (tw, th) } else { (w, h) };
+        let sprite = PolychromeSprite {
+            order: surface.order,
+            pad: 0,
+            grayscale: false.into(),
+            opacity: 1.0,
+            bounds: surface.bounds,
+            content_mask: surface.content_mask.clone(),
+            corner_radii: Default::default(),
+            tile: gpui::AtlasTile {
+                texture_id: AtlasTextureId { index: 0, kind: gpui::AtlasTextureKind::Polychrome },
+                tile_id: gpui::TileId(0),
+                padding: 0,
+                bounds: Bounds::new(point(DevicePixels(0), DevicePixels(0)), size(DevicePixels(w), DevicePixels(h))),
+            },
+        };
+        self.draw_polychrome_from(
+            texture,
+            std::slice::from_ref(&sprite),
+            instance_buffer,
+            instance_offset,
+            viewport_size,
+            command_encoder,
+        )
     }
 }
 

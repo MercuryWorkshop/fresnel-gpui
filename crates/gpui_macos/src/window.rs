@@ -538,6 +538,8 @@ struct MacWindowState {
     close_callback: Option<Box<dyn FnOnce()>>,
     appearance_changed_callback: Option<Box<dyn FnMut()>>,
     input_handler: Option<PlatformInputHandler>,
+    /// Inline Writing Tools on the view, once it has been asked for.
+    writing_tools: Option<crate::writing_tools::WritingTools>,
     last_key_equivalent: Option<KeyDownEvent>,
     synthetic_drag_counter: usize,
     traffic_light_position: Option<Point<Pixels>>,
@@ -951,6 +953,7 @@ impl MacWindow {
                 close_callback: None,
                 appearance_changed_callback: None,
                 input_handler: None,
+                writing_tools: None,
                 last_key_equivalent: None,
                 synthetic_drag_counter: 0,
                 traffic_light_position: titlebar
@@ -1659,6 +1662,17 @@ impl PlatformWindow for MacWindow {
         self.0.lock().move_traffic_light();
     }
 
+    fn set_writing_tools(&self, enabled: bool) {
+        // Out of the lock: AppKit may ask the delegate, which takes it, from
+        // inside the property set.
+        let (view, mut tools) = {
+            let mut lock = self.0.lock();
+            (lock.native_view.as_ptr() as *mut c_void, lock.writing_tools.take())
+        };
+        crate::writing_tools::set(view, enabled, &mut tools);
+        self.0.lock().writing_tools = tools;
+    }
+
     fn show_character_palette(&self) {
         let this = self.0.lock();
         let window = this.native_window;
@@ -1877,6 +1891,14 @@ impl PlatformWindow for MacWindow {
 
     fn gpu_specs(&self) -> Option<gpui::GpuSpecs> {
         None
+    }
+
+    fn import_iosurface(&self, image: &gpui::IoSurfaceImage) -> anyhow::Result<gpui::ExternalTextureId> {
+        self.0.lock().renderer.import_iosurface(image)
+    }
+
+    fn release_external_texture(&self, id: gpui::ExternalTextureId) {
+        self.0.lock().renderer.release_external_texture(id)
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
@@ -3146,7 +3168,7 @@ fn drag_event_position(window_state: &Mutex<MacWindowState>, dragging_info: id) 
     convert_mouse_position(drag_location, window_state.lock().view_origin())
 }
 
-fn with_input_handler<F, R>(window: &Object, f: F) -> Option<R>
+pub(crate) fn with_input_handler<F, R>(window: &Object, f: F) -> Option<R>
 where
     F: FnOnce(&mut PlatformInputHandler) -> R,
 {

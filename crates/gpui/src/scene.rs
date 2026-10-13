@@ -769,14 +769,15 @@ pub struct PaintSurface {
     pub order: DrawOrder,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
+    /// A video frame ([`crate::Window::paint_surface`]); `None` for an
+    /// imported texture.
     #[cfg(target_os = "macos")]
-    pub image_buffer: core_video::pixel_buffer::CVPixelBuffer,
-    /// A texture the platform imported from outside (a dma-buf, on Linux).
-    #[cfg(not(target_os = "macos"))]
+    pub image_buffer: Option<core_video::pixel_buffer::CVPixelBuffer>,
+    /// A texture the platform imported from outside (a dma-buf on Linux, a
+    /// shared texture on Windows, an IOSurface on macOS).
     pub texture: crate::ExternalTextureId,
     /// How much of the texture to show, from its top left (a producer may
     /// render a frame smaller than the buffer it allocated).
-    #[cfg(not(target_os = "macos"))]
     pub source: Size<crate::DevicePixels>,
     /// The imported fence value to wait for (on the GPU) before sampling; 0
     /// for none.
